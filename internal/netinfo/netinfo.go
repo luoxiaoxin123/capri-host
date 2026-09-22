@@ -1,6 +1,11 @@
 // Package netinfo reports the addresses a person needs in order to reach this
-// host from another device — the LAN IP to type into a phone, and the hub's
+// machine from another device: the LAN IP to type into a phone, and the hub's
 // resolved address for comparison when the relay looks down.
+//
+// Platform-independent and dependency-free by design. Today's only caller is
+// the Windows tray, which asks these questions about the machine it shares
+// with the host — locally, because that is cheaper than a round trip and still
+// works while the host is starting.
 package netinfo
 
 import (
@@ -111,6 +116,26 @@ func Interfaces() []Iface {
 func isPrivate(s string) bool {
 	ip := net.ParseIP(s)
 	return ip != nil && ip.IsPrivate()
+}
+
+// PreferredIP picks the address to hand another device: the default route's
+// source address when it belongs to a real interface, else the first candidate,
+// else the outbound address as a last resort. Empty when there is nothing
+// usable, which callers render as a disabled control rather than a broken URL.
+//
+// Preferring the default route's address is what fixes the case an adapter
+// metric sort gets wrong — on a machine running a proxy, a virtual NIC often
+// sorts first and its address is unreachable from a phone.
+func PreferredIP(ni Info) string {
+	for _, ifc := range ni.Ifaces {
+		if ifc.IP == ni.Outbound {
+			return ifc.IP
+		}
+	}
+	if len(ni.Ifaces) > 0 {
+		return ni.Ifaces[0].IP
+	}
+	return ni.Outbound
 }
 
 // ResolveHub extracts the host from a hub base URL and resolves it, so a

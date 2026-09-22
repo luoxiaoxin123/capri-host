@@ -63,7 +63,7 @@ func (c *Client) State() State {
 		Configured: true,
 		HubURL:     c.cfg.URL,
 		HostID:     c.cfg.HostID,
-		HostName:   c.cfg.HostName,
+		HostName:   c.hostName(),
 		Connected:  c.connected.Load(),
 	}
 
@@ -135,8 +135,8 @@ func (c *Client) Pair(ctx context.Context, code string) error {
 // with no AccessToken cannot rename — the caller reports that. The hub
 // updates its registry live (no reconnection needed): the next event frame
 // this client sends already carries the new name, and browsers refresh via
-// the hub's hosts_changed broadcast. c.cfg.HostName is updated on success so
-// subsequent frames are consistent.
+// the hub's hosts_changed broadcast. The client's display name is updated on
+// success so subsequent frames are consistent.
 func (c *Client) Rename(ctx context.Context, newName string) error {
 	if c.cfg.URL == "" {
 		return errors.New("未配置 hub，无法在 hub 上改名")
@@ -158,14 +158,16 @@ func (c *Client) Rename(ctx context.Context, newName string) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		var out struct{ Error string `json:"error"` }
+		var out struct {
+			Error string `json:"error"`
+		}
 		_ = json.NewDecoder(io.LimitReader(res.Body, 4<<10)).Decode(&out)
 		if out.Error != "" {
 			return fmt.Errorf("hub 拒绝改名: %s", out.Error)
 		}
 		return fmt.Errorf("hub 拒绝改名 (HTTP %d)", res.StatusCode)
 	}
-	c.cfg.HostName = newName
+	c.name.Store(newName)
 	log.Printf("[hub-client] hub 上的显示名已更新为 %q", newName)
 	return nil
 }

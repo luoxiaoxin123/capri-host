@@ -387,10 +387,10 @@ func (b *Bridge) restoreLastSession(ctx context.Context) error {
 		cwd = mustCwd()
 	}
 	if _, err := b.LoadSession(ctx, sid, cwd); err != nil {
-		log.Printf("[capri-host] restore session %s failed: %v", sid, err)
+		log.Printf("[Capri-host] restore session %s failed: %v", sid, err)
 		return fmt.Errorf("恢复会话失败: %w", err)
 	}
-	log.Printf("[capri-host] restored session %s (cwd=%s)", sid, cwd)
+	log.Printf("[Capri-host] restored session %s (cwd=%s)", sid, cwd)
 	return nil
 }
 
@@ -1028,7 +1028,7 @@ func (b *Bridge) ensureBooted(ctx context.Context) error {
 	// surface we use is small and stable. (JSON numbers decode as float64.)
 	if pv, ok := initRes["protocolVersion"]; ok {
 		if n, isNum := asInt(pv); !isNum || n != protocolVersion {
-			log.Printf("[capri-host] agent protocolVersion = %v, host expects %d (continuing)", pv, protocolVersion)
+			log.Printf("[Capri-host] agent protocolVersion = %v, host expects %d (continuing)", pv, protocolVersion)
 		}
 	}
 
@@ -1442,7 +1442,7 @@ func (b *Bridge) ensureProcess() error {
 	go b.readStderr(stderr)
 	go b.waitProcess(cmd)
 
-	log.Printf("[capri-host] spawned %s agent stdio pid=%d", b.cfg.Bin, cmd.Process.Pid)
+	log.Printf("[Capri-host] spawned %s agent stdio pid=%d", b.cfg.Bin, cmd.Process.Pid)
 	return nil
 }
 
@@ -1461,12 +1461,12 @@ func (b *Bridge) waitProcess(cmd *exec.Cmd) {
 		// 进程已被外部清理取代（host 不再主动 killProcess，此分支仅
 		// 防御）：补一条实际死亡时间戳，时间线才完整。
 		if cmd.Process != nil {
-			log.Printf("[capri-host] agent process %d reaped (superseded, code=%d)", cmd.Process.Pid, code)
+			log.Printf("[Capri-host] agent process %d reaped (superseded, code=%d)", cmd.Process.Pid, code)
 		}
 		return
 	}
 	lastID, _ := b.resetProcessRoster("process-exit", cmd)
-	log.Printf("[capri-host] grok process exited (code=%d), lastSession=%s", code, lastID)
+	log.Printf("[Capri-host] grok process exited (code=%d), lastSession=%s", code, lastID)
 	b.Broadcast(Event{
 		kType:    "status",
 		kText:    "连接HOST异常，请检查后重试",
@@ -1501,7 +1501,7 @@ func (b *Bridge) readStdout(ctx context.Context, r io.Reader) {
 		}
 		line, err := br.ReadBytes('\n')
 		if len(line) > maxLineBytes {
-			log.Printf("[capri-host] stdout 单行超过 %dMB 上限（%d 字节），agent 输出通道已损坏", maxLineBytes>>20, len(line))
+			log.Printf("[Capri-host] stdout 单行超过 %dMB 上限（%d 字节），agent 输出通道已损坏", maxLineBytes>>20, len(line))
 			b.failAllPending(fmt.Errorf("agent 输出通道已损坏: 单行 %d 字节超上限", len(line)))
 			b.Broadcast(Event{
 				kType:    "status",
@@ -1517,7 +1517,7 @@ func (b *Bridge) readStdout(ctx context.Context, r io.Reader) {
 				b.handleStdoutLineContext(ctx, line)
 			}
 			if err != io.EOF {
-				log.Printf("[capri-host] stdout 扫描错误: %v — agent 输出通道已损坏", err)
+				log.Printf("[Capri-host] stdout 扫描错误: %v — agent 输出通道已损坏", err)
 				b.failAllPending(fmt.Errorf("agent 输出通道已损坏: %v", err))
 				b.Broadcast(Event{
 					kType:    "status",
@@ -3307,7 +3307,7 @@ func (b *Bridge) PromptWithOpts(ctx context.Context, sessionID string, blocks []
 
 					// 如果自发出 prompt 以来没有任何活动 update（seenAt 未推进）
 					if lastActivity <= sentAt {
-						log.Printf("[capri-host] prompt stall detected (session=%s): 持续无活动超过 %v，判定底层可能死锁，提前熔断", sessionID, stallTimeout)
+						log.Printf("[Capri-host] prompt stall detected (session=%s): 持续无活动超过 %v，判定底层可能死锁，提前熔断", sessionID, stallTimeout)
 						stalled.Store(true)
 						cancelPrompt()
 						return
@@ -3414,9 +3414,9 @@ func (b *Bridge) reportPromptFailure(sessionID string, err error) bool {
 		return true
 	}
 	// 留痕底层错误：区分超时 / 写失败 / 进程退出，事后才能还原事故。
-	log.Printf("[capri-host] prompt transport failure (session=%s): %v", sessionID, err)
+	log.Printf("[Capri-host] prompt transport failure (session=%s): %v", sessionID, err)
 	if b.turnStillStreaming(sessionID) {
-		log.Printf("[capri-host] prompt error not surfaced (session=%s): agent turn still streaming, session stays active", sessionID)
+		log.Printf("[Capri-host] prompt error not surfaced (session=%s): agent turn still streaming, session stays active", sessionID)
 		return false
 	}
 	b.broadcastPromptError(sessionID, err)
@@ -3571,7 +3571,7 @@ func (b *Bridge) resetProcessRoster(reason string, expected *exec.Cmd) (string, 
 		b.cancelRd = nil
 	}
 	b.mu.Unlock()
-	log.Printf("[capri-host] agent state reset (reason=%s)", reason)
+	log.Printf("[Capri-host] agent state reset (reason=%s)", reason)
 	b.failAllPending(fmt.Errorf("grok 进程已退出或不可用"))
 	b.broadcastRosterChange()
 	return lastID, lastCwd
@@ -3603,7 +3603,7 @@ func (b *Bridge) RestartAgent(ctx context.Context) error {
 			return fmt.Errorf("重启后恢复会话失败: %w", err)
 		}
 	}
-	log.Printf("[capri-host] agent restarted (user request)")
+	log.Printf("[Capri-host] agent restarted (user request)")
 	return nil
 }
 
@@ -4502,7 +4502,7 @@ func (b *Bridge) LoadSession(ctx context.Context, sessionID, cwd string, meta ..
 	// rebuild from HTTP history now (initiator already does via its own
 	// loadHistory; this flag is for multi-tab viewers of the same sid).
 	if n := b.replayDropped.Swap(0); n > 0 {
-		log.Printf("[capri-host] session/load %s：拦下 %d 条重放事件（历史走 HTTP，不上总线）", sessionID[:min(8, len(sessionID))], n)
+		log.Printf("[Capri-host] session/load %s：拦下 %d 条重放事件（历史走 HTTP，不上总线）", sessionID[:min(8, len(sessionID))], n)
 	}
 	b.Broadcast(Event{
 		kType:      "session_load_finished",
@@ -4846,7 +4846,7 @@ func (b *Bridge) SessionUpdates(ctx context.Context, sessionID, cwd string, opts
 		page, err := b.localUpdatesPage(sessionID, cwd, o)
 		if err == nil {
 			applyUpdatesDetail(&page, o)
-			log.Printf("[capri-host] session updates served locally (msgSeq total=%d promptStarts=%d)", page.TotalCount, len(page.PromptStarts))
+			log.Printf("[Capri-host] session updates served locally (msgSeq total=%d promptStarts=%d)", page.TotalCount, len(page.PromptStarts))
 			return page, nil
 		}
 		if !errors.Is(err, errLocalHistoryUnavailable) {
@@ -4906,7 +4906,7 @@ func (b *Bridge) SessionUpdates(ctx context.Context, sessionID, cwd string, opts
 		}
 	}
 	normalizeSyntheticToolCallsInSlice(page.Updates)
-	log.Printf("[capri-host] session updates via _x.ai/session/updates ok (total=%d promptStarts=%d)", page.TotalCount, len(page.PromptStarts))
+	log.Printf("[Capri-host] session updates via _x.ai/session/updates ok (total=%d promptStarts=%d)", page.TotalCount, len(page.PromptStarts))
 	// 透传出口同样投影（[C]「两条路径共用同一投影函数」）。stream=true 的
 	// 信封不走这个响应（以 session_updates_chunk 推流），没有可裁的页，
 	// 因此不回显 projected —— FE 按 host 不支持 lite 处理。
@@ -5853,7 +5853,7 @@ func (b *Bridge) Shutdown() {
 	// Flush the usage ledger so the process's last turns are persisted even
 	// if the periodic sync has not fired yet.
 	if err := b.syncUsageLedger(); err != nil {
-		log.Printf("[capri-host] 退出前用量台账落盘失败: %v", err)
+		log.Printf("[Capri-host] 退出前用量台账落盘失败: %v", err)
 	}
 
 	// Stop the goal loop: a continuation turn can be blocked on a

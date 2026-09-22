@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -297,6 +298,37 @@ func TestManagerPersistFailureDoesNotFailThePairing(t *testing.T) {
 	}
 }
 
+func TestManagerDisconnect(t *testing.T) {
+	h := newPairingHub(t, "ABC234", "tok-1")
+	var persistedURL string
+	m, _ := managerFor(t, "")
+	m.persist = func(u string) error {
+		persistedURL = u
+		return nil
+	}
+
+	if err := m.PairWith(context.Background(), h.url(), "ABC234"); err != nil {
+		t.Fatalf("PairWith: %v", err)
+	}
+	if m.HubURL() == "" {
+		t.Fatalf("expected non-empty HubURL after pairing")
+	}
+
+	if err := m.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if got := m.HubURL(); got != "" {
+		t.Errorf("HubURL after disconnect = %q, want empty", got)
+	}
+	if persistedURL != "" {
+		t.Errorf("persist called with %q, want empty", persistedURL)
+	}
+	st := m.State()
+	if st.Configured {
+		t.Errorf("expected state to be unconfigured after disconnect")
+	}
+}
+
 func TestManagerRunExitsOnContextCancel(t *testing.T) {
 	m, _ := managerFor(t, "")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -311,6 +343,80 @@ func TestManagerRunExitsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestManagerRenameKeepsLocalNameWhenHubRejects(t *testing.T) {
+	t.Setenv("CAPRI_HOME", t.TempDir())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/hosts/{id}/rename", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "nope"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	m := NewManager(Config{
+		URL:         srv.URL,
+		HostID:      "h1",
+		HostName:    "old",
+		AccessToken: "tok",
+		StateFile:   filepath.Join(t.TempDir(), "hub.json"),
+	}, nil)
+	cl := NewClient(Config{
+		URL:         srv.URL,
+		HostID:      "h1",
+		HostName:    "old",
+		AccessToken: "tok",
+	})
+	m.mu.Lock()
+	m.cur = cl
+	m.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Rename(ctx, "新名字"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if got := cl.hostName(); got != "新名字" {
+		t.Errorf("client name = %q, want 新名字", got)
+	}
+	st := m.State()
+	if st.HostName != "新名字" {
+		t.Errorf("State.HostName = %q, want 新名字", st.HostName)
+	}
+	if st.LastError != "" {
+		t.Errorf("LastError = %q; a rename failure must not replace the session error", st.LastError)
+	}
+}
+
+func TestManagerRenameKeepsSessionError(t *testing.T) {
+	t.Setenv("CAPRI_HOME", t.TempDir())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/hosts/{id}/rename", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	m := NewManager(Config{
+		URL: srv.URL, HostID: "h1", HostName: "old", AccessToken: "tok",
+		StateFile: filepath.Join(t.TempDir(), "hub.json"),
+	}, nil)
+	cl := NewClient(Config{URL: srv.URL, HostID: "h1", HostName: "old", AccessToken: "tok"})
+	cl.setLastErr(errors.New("dial tcp: timeout"))
+	m.mu.Lock()
+	m.cur = cl
+	m.mu.Unlock()
+
+	if err := m.Rename(context.Background(), "新名字"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if got := m.State().LastError; got != "dial tcp: timeout" {
+		t.Errorf("LastError = %q, want the session error kept", got)
 	}
 }
 
@@ -333,5 +439,110 @@ func TestManagerStateReadsTokenFromDiskWithNoClient(t *testing.T) {
 	m2 := NewManager(Config{URL: "https://other.example.com", HostID: "x", StateFile: stateFile}, nil)
 	if st := m2.State(); st.Paired {
 		t.Errorf("token for another hub counted as paired: %+v", st)
+	}
+}
+
+// ── reusing a stored credential ───────────────────────────────────────
+//
+// The reuse path exists because pairing is the wrong answer to "connect me to
+// the hub I already use": a code has to be collected from the hub, expires in
+// 15 minutes, and proves nothing the hub has not already recorded.
+
+func writeToken(t *testing.T, path, hubURL string) {
+	t.Helper()
+	if err := writeStateFile(path, stateFile{URL: hubURL, HostID: "h1", Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReuseAdoptsTheStoredCredential(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hub.json")
+	writeToken(t, statePath, "https://hub.example")
+
+	var persisted string
+	m := NewManager(
+		Config{URL: "https://old.example", HostID: "h1", HostName: "h", StateFile: statePath},
+		func(u string) error { persisted = u; return nil })
+
+	if err := m.Reuse("https://hub.example"); err != nil {
+		t.Fatalf("Reuse: %v", err)
+	}
+	if got := m.HubURL(); got != "https://hub.example" {
+		t.Errorf("HubURL = %q, want the reused address", got)
+	}
+	// The choice has to reach config.json, or the next start comes up on the
+	// old hub and the user repeats the whole exercise.
+	if persisted != "https://hub.example" {
+		t.Errorf("persisted = %q, want the reused address", persisted)
+	}
+}
+
+func TestReuseNormalisesBeforeMatching(t *testing.T) {
+	// hub.json stores an address the way the host normalised it. A user who
+	// types the same hub sloppily must still match it, or the credential looks
+	// like it belongs to some other hub and reuse is refused for no reason.
+	statePath := filepath.Join(t.TempDir(), "hub.json")
+	writeToken(t, statePath, "https://hub.example")
+
+	m := NewManager(Config{HostID: "h1", StateFile: statePath}, nil)
+	if err := m.Reuse("hub.example/"); err != nil {
+		t.Fatalf("Reuse: %v", err)
+	}
+	if got := m.HubURL(); got != "https://hub.example" {
+		t.Errorf("HubURL = %q, want https://hub.example", got)
+	}
+}
+
+func TestReuseRefusesWithoutACredential(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hub.json") // nothing on disk
+	m := NewManager(Config{URL: "https://old.example", HostID: "h1", StateFile: statePath}, nil)
+
+	err := m.Reuse("https://hub.example")
+	if err == nil {
+		t.Fatal("Reuse succeeded with no credential on disk")
+	}
+	if !strings.Contains(err.Error(), "可用凭证") {
+		t.Errorf("err = %v; it has to say a pairing code is needed", err)
+	}
+	// And it must not have moved the host to an address it cannot reach.
+	if got := m.HubURL(); got != "https://old.example" {
+		t.Errorf("HubURL = %q; a refused reuse must not retarget", got)
+	}
+}
+
+func TestReuseRefusesACredentialForAnotherHub(t *testing.T) {
+	// A token minted for one hub is not a credential for another; accepting it
+	// would produce an auth failure the user cannot act on.
+	statePath := filepath.Join(t.TempDir(), "hub.json")
+	writeToken(t, statePath, "https://other.example")
+
+	m := NewManager(Config{URL: "https://old.example", HostID: "h1", StateFile: statePath}, nil)
+	if err := m.Reuse("https://hub.example"); err == nil {
+		t.Error("Reuse reused a credential bound to a different hub")
+	}
+	if got := m.HubURL(); got != "https://old.example" {
+		t.Errorf("HubURL = %q, want unchanged", got)
+	}
+}
+
+func TestReuseIsANoOpWhenAlreadyOnThatHub(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "hub.json")
+	writeToken(t, statePath, "https://hub.example")
+
+	persists := 0
+	m := NewManager(
+		Config{URL: "https://hub.example", HostID: "h1", StateFile: statePath},
+		func(string) error { persists++; return nil })
+	// A live client already running on exactly this credential: nothing to
+	// change, and no reason to drop the connection over it.
+	m.mu.Lock()
+	m.cur = NewClient(m.cfg)
+	m.mu.Unlock()
+
+	if err := m.Reuse("https://hub.example"); err != nil {
+		t.Fatalf("Reuse: %v", err)
+	}
+	if persists != 0 {
+		t.Errorf("persisted %d time(s) on a no-op; the file should be left alone", persists)
 	}
 }

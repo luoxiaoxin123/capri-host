@@ -22,11 +22,11 @@
 
 **Capri**（Capricorn）是 [Grok Build](https://x.ai/cli) 的具体适配项目，我们基于 ACP 协议，搭配 capri-fe、capri-hub 实现远程 Agent 控制。
 
-一个进程、一个端口，同时提供 **Web 界面** 和接口。Windows 上还内置**系统托盘**；macOS 上还提供一个菜单栏应用，把启停和配置收进图形界面。
+一个进程、一个端口，同时提供 **Web 界面** 和接口。macOS 上还提供一个菜单栏应用，把启停和配置收进图形界面。
 
 ```
-浏览器  ──本机──▶  capri-host :8765  ──▶  grok
-浏览器  ──远程──▶  capri-hub        ──▶  capri-host × N  ──▶  grok
+浏览器  ──本机──▶  Capri-host :8765  ──▶  grok
+浏览器  ──远程──▶  capri-hub        ──▶  Capri-host × N  ──▶  grok
 ```
 
 ## 截图
@@ -37,9 +37,7 @@
 
 1、安装并登录 [`Grok Build`](https://x.ai/cli)（或设置 `XAI_API_KEY`）。
 
-2、从 [Releases](https://github.com/AgentsHarness/capri-host/releases) 选你的平台。
-
-**Windows**：首次运行 SmartScreen 可能拦一次，点「更多信息 → 仍要运行」。双击即可；托盘是主要入口。
+2、从 [Releases](https://github.com/AgentsHarness/capri-host/releases) 里选一种装上。
 
 ### macOS 应用（推荐，13+）
 
@@ -56,13 +54,31 @@
 xattr -dr com.apple.quarantine /Applications/Capri.app
 ```
 
-### 命令行二进制
+### Windows 应用（推荐）
 
-从 Releases 下对应平台的 `capri-host-*`：
+下载 `Capri-windows-amd64.zip`（或 `Capri-windows-arm64.zip`，根据系统架构选择），解压后进入 `Capri`
+目录，双击 **`Capri.exe`**。
+
+目录结构：
+
+```
+Capri/
+├── Capri.exe            双击运行的就是它：托盘图标、对话框、Host 进程的启停
+└── bin/
+    └── Capri-host.exe   干活的引擎（HTTP + grok），由 Capri.exe 拉起
+```
+
+**引擎不要单独双击**——它是个控制台程序，双击只会开一个黑窗口。整个目录一起保留，
+`Capri.exe` 按相对位置找 `bin/Capri-host.exe`。
+
+点击托盘菜单的设置进入网页设置界面，配置好即可保存，然后通过托盘菜单启动或重启 Host。
+## 命令行二进制
+
+从 Releases 下对应平台的 `Capri-host-*`：
 
 ```bash
-chmod +x capri-host   # 按实际文件名
-./capri-host
+chmod +x Capri-host   # 按实际文件名
+./Capri-host
 ```
 
 可以只用环境变量配置，适合脚本、launchd、systemd，以及在服务器上跑。
@@ -75,96 +91,24 @@ cd capri-host
 go run ./cmd/capri-host
 ```
 
-Windows 上要构建出「双击不弹黑框」的版本，必须带 `-H=windowsgui`——否则二进制
-是 console 子系统，双击时 Windows 会给它开一个终端窗口：
+浏览器打开 <http://localhost:8765>。
 
-```powershell
-go build -ldflags "-s -w -H=windowsgui" -o capri-host.exe ./cmd/capri-host
+要出 Windows 那套目录（`Capri/Capri.exe` + `Capri/bin/Capri-host.exe`，清单按架构生成）：
+
+```bash
+./packaging/windows/make-exes.sh amd64 arm64
 ```
 
-
-## 系统托盘（Windows）
-
-双击启动没有终端窗口，所以托盘是它唯一的可见入口：
-
-| 菜单项           | 说明                                                                 |
-| ---------------- | -------------------------------------------------------------------- |
-| 打开本机地址     | `http://localhost:8765/`                                             |
-| 打开内网地址     | `http://<局域网 IP>:8765/`，同一 Wi-Fi 下的手机 / 平板用这个         |
-| 打开 hub 地址    | 仅在已配对时出现——未配对时那个地址打开是一个不认识你的页面           |
-| 配对 hub…        | 先填 hub 地址，再填 6 位配对码。**新用户不需要手动创建任何配置文件** |
-| 阻止电脑休眠     | 开关。只按住系统电源请求，屏幕仍然正常息屏                           |
-| 连接信息…        | 本机名称、本机 / 内网 / hub 地址、配对与连接状态、配置与日志路径     |
-| 开机自启         | 开关，**默认关闭**。写当前用户的注册表，不需要管理员权限             |
-| 打开日志         | 打开 `logs\host.log`                                                 |
-| 退出             | 同时结束 grok 子进程                                                 |
-
-关于**配对**：填过一次之后 hub 地址会写回 `config.toml`，配对 token 写入
-`hub.json`，之后重启直接连。配对失败（码错了、地址不通）不会影响当前已经建立
-的连接。换到另一台 hub 也从这里操作，不需要重启进程。
-
-关于**开机自启**：注册表里记的是 exe 的绝对路径。挪动 exe 之后再手动启动一次
-会自动修正路径；但如果挪完直接重启，开机时会因为旧路径已经没有文件而什么都不
-启动。登录启动时不会弹浏览器（命令行带 `--autostart` 标记）。
-
-托盘只在 Windows 上编译。其他平台跑在 shell 或 service manager 里，托盘图标无处
-安放，`Supported()` 直接返回 false。
-
-## 配置文件
-
-Windows 双击运行时没有人替你设置环境变量，所以设置放在
-`%USERPROFILE%\.capri-host\config.toml`（**环境变量仍然优先于这个文件**）。
-
-文件不会自动生成——不配也能跑，只是跑在纯本机模式。要连 hub，从托盘的
-「配对 hub…」走一遍就够了，它会自己把文件写出来。手写的话：
-
-```toml
-# Windows 路径要用单引号（TOML 里 \ 在双引号中是转义符）
-port     = 8765
-grok_bin = 'C:\Users\you\.grok\bin\grok.exe'
-host_id  = 'pc'
-host_name = '家里的 Windows'
-fe_token = 'xxxxxxxx'
-hub_url  = 'https://hub.example.com'
-```
-
-| 键                          | 对应环境变量          |
-| --------------------------- | --------------------- |
-| `port`                      | `PORT`                |
-| `grok_bin`                  | `GROK_BIN`            |
-| `host_id` / `host_name`     | `HOST_ID` / `HOST_NAME` |
-| `fe_token`                  | `FE_TOKEN`            |
-| `hub_url` / `hub_pair_code` | `HUB_URL` / `HUB_PAIR_CODE` |
-| `host_token`                | `HOST_TOKEN`          |
-| `hub_quic_pin`              | `HUB_QUIC_PIN`        |
-| `open_browser`              | `CAPRI_OPEN_BROWSER`  |
-| `tray`                      | `CAPRI_TRAY`          |
-
-
-### 文件位置
-
-都在 `%USERPROFILE%\.capri-host\`（其他平台是 `~/.capri-host/`，可用
-`CAPRI_HOST_DIR` 整体搬走）：
-
-| 文件                 | 内容                                     |
-| -------------------- | ---------------------------------------- |
-| `config.toml`        | 设置                                     |
-| `hub.json`           | 配对拿到的 token，配对成功后自动写       |
-| `logs/host.log`      | 日志，超过 8 MiB 轮转                    |
-| `last-session.json`  | 上次会话指针                             |
+macOS 应用同理：`./packaging/macos/make-app.sh --universal`。
 
 ## 连接到 capri-hub
 
-在一台能被访问的服务器上先起 [capri-hub](https://github.com/AgentsHarness/capri-hub)，
-并部署 capri-fe。配对码由 **hub** 生成（6 位、15 分钟有效、过期自动轮换），host
-只负责拿码去换 token：hub 侧 `capri-hub paircode` 或前端左上角「添加 Host」都能看到。
+在一台能被访问的服务器上先起 [capri-hub](https://github.com/AgentsHarness/capri-hub)，并部署 capri-fe，通过前端左上角添加 Host 获得配对码。
 
-**Windows**：托盘里选「配对 hub…」，填地址和配对码即可；成功后会写进
-`config.toml`。
+macOS 应用在设置窗里填 Hub URL 和配对码即可，配对成功后地址会留在 `config.json`。
+Windows 托盘在设置界面配置，同样落在 `config.json`。
 
-**macOS**：应用在设置窗里填 Hub URL 和配对码即可，配对成功后地址会留在 `config.json`。
-
-**其他平台**（或想用环境变量的话）：
+命令行启动则需要提供环境变量：
 
 ```bash
 # 自行修改
@@ -173,24 +117,19 @@ HUB_PAIR_CODE=XXXXXX
 HOST_ID=pc
 HOST_NAME="家里的 Mac"
 FE_TOKEN=XXXXXX
-nohup ./capri-host >> capri-host.log 2>&1 & echo $! > capri-host.pid
+nohup ./Capri-host >> Capri-host.log 2>&1 & echo $! > capri-host.pid
 ```
 
 配对成功后 token 写在 `~/.capri-host/hub.json`，之后只需带 `HUB_URL`、`FE_TOKEN` 重启。浏览器打开独立部署的前端地址，选这台 Host 即可。
 
-同一台 hub 上 `HOST_ID` 必须唯一——hub 是按它建索引的，两台都用默认的 `local` 会
-互相顶掉。从托盘配对时，如果本机标识还是默认值，会自动按机器名派生一个写进配置。
+## 配置
 
-配对状态也有接口，前端和手机端用的是同一套：
+两处可配，**环境变量优先于文件**：
 
-| 接口                  | 说明                                                        |
-| --------------------- | ----------------------------------------------------------- |
-| `GET /api/hub/state`  | 是否配置 / 是否配对 / 是否连上 / 传输是 QUIC 还是 WS / 最近错误 |
-| `POST /api/hub/pair`  | `{"code":"XXXXXX","hubUrl":"https://…"}`，`hubUrl` 可省略      |
+1. `~/.capri-host/config.json`——macOS 应用和 Windows 托盘读写的是同一份，也可以手写；
+2. 环境变量——命令行、launchd、systemd 用这套，会覆盖文件里的同名字段。
 
-更完整的部署说明（后台、开机自启、防火墙）见 [docs/DEPLOY.md](docs/DEPLOY.md)。事件语义契约（seq / 双路去重 / 分级背压）见 [docs/EVENT-CONTRACTS.md](docs/EVENT-CONTRACTS.md)。
-
-所以装了应用之后依然可以临时 `PORT=9000 ./capri-host`。
+所以装了应用之后依然可以临时 `PORT=9000 ./Capri-host`。
 
 ```json
 {
@@ -207,38 +146,25 @@ nohup ./capri-host >> capri-host.log 2>&1 & echo $! > capri-host.pid
 }
 ```
 
+测试或便携安装可设 `CAPRI_HOME` 换掉配置目录。
+
 ## 常用变量
 
-| 变量                  | 默认            | 说明                                                                                                                                 |
-| --------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `PORT`                | `8765`          | HTTP 端口（界面 + 接口）                                                                                                             |
-| `BIND`                | `127.0.0.1`     | 监听地址。默认只听回环，只有本机能够直连；要让手机等同网段设备访问，显式设 `BIND=0.0.0.0`——那**必须**同时设 `FE_TOKEN`，否则拒绝启动 |
-| `GROK_BIN`            | `grok`          | grok 可执行文件；留空则按常见路径探测                                                                                                |
-| `HOST_ID`             | `local`         | 多机时用来区分，同 hub 内需唯一                                                                                                      |
-| `HOST_NAME`           | `Local Host`    | 界面上的名字                                                                                                                         |
-| `XAI_API_KEY`         | —               | 可选；否则用 `grok login`                                                                                                            |
-| `HUB_URL`             | —               | 设置后连上 Hub                                                                                                                       |
-| `HUB_PAIR_CODE`       | —               | 配对码，也可从托盘输入                                                                                                               |
-| `FE_TOKEN`            | —               | 本机接口的访问密钥（`/api/*`、`/events`）。与 Hub 的 `FE_TOKEN` **是两把独立的钥匙**，见下                                            |
-| `HOST_TOKEN`          | —               | 直接给配对 token，跳过配对                                                                                                           |
-| `HUB_QUIC_PIN`        | —               | 自签 hub 的 QUIC 证书指纹（见 `docs/DEPLOY.md`）                                                                                     |
-| `PROXY`               | —               | 出网代理，可只写 `host:port`（自动补 `http://`）。留空则 macOS 读取系统网络设置里的代理；系统未开时直连                                 |
-| `NO_PROXY`            | —               | 不走代理的地址列表，逗号分隔。留空则沿用系统网络设置里的排除列表                                                                      |
-| `CAPRI_HOST_DIR`      | `~/.capri-host` | 设置、日志、token 的存放目录                                                                                                         |
-| `CAPRI_HOME`          | `~/.capri-host` | 配置目录（`config.json`、`hub.json` 都在这下面）                                                                                     |
-| `CAPRI_TRAY`          | `1`             | 设为 `0` 不启动托盘                                                                                                                  |
-| `CAPRI_OPEN_BROWSER`  | `1`             | 设为 `0` 启动时不打开浏览器                                                                                                          |
-
-## 配置文件
-
-两处可配，**环境变量优先于文件**：
-
-1. `~/.capri-host/config.toml`——Windows 托盘 / 单 exe 路径读写；
-2. `~/.capri-host/config.json`——macOS 应用写的是这份，也可以手写；
-3. 环境变量——命令行、launchd、systemd 用这套，会覆盖文件里的同名项。
-
-也可用 `CAPRI_HOME`（config.json）或 `CAPRI_HOST_DIR`（config.toml / 日志）覆盖配置目录。
-
+| 变量            | 默认        | 说明                                                                                                                                 |
+| --------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`          | `8765`      | HTTP 端口（界面 + 接口）                                                                                                             |
+| `BIND`          | `127.0.0.1` | 监听地址。默认只听回环，只有本机能够直连；要让手机等同网段设备访问，显式设 `BIND=0.0.0.0`——那**必须**同时设 `FE_TOKEN`，否则拒绝启动 |
+| `GROK_BIN`      | `grok`      | grok 可执行文件；留空则按常见路径探测                                                                                                |
+| `HOST_ID`       | `local`     | 多机时用来区分                                                                                                                       |
+| `HOST_NAME`     | `Local Host`| 界面上的名字                                                                                                                         |
+| `XAI_API_KEY`   | —           | 可选；否则用 `grok login`                                                                                                            |
+| `HUB_URL`       | —           | 设置后连上 Hub                                                                                                                       |
+| `HUB_PAIR_CODE` | —           | 一次性配对码                                                                                                                         |
+| `FE_TOKEN`      | —           | 本机接口的访问密钥（`/api/*`、`/events`）。与 Hub 的 `FE_TOKEN` **是两把独立的钥匙**，见下                                            |
+| `HUB_QUIC_PIN`  | —           | 自签 hub 的 QUIC 证书指纹（见 `docs/DEPLOY.md`）                                                                                     |
+| `PROXY`         | —           | 出网代理，可只写 `host:port`（自动补 `http://`）。留空则 macOS 读取系统网络设置里的代理；系统未开时直连                                 |
+| `NO_PROXY`      | —           | 不走代理的地址列表，逗号分隔。留空则沿用系统网络设置里的排除列表                                                                      |
+| `CAPRI_HOME`    | `~/.capri-host` | 配置目录（`config.json`、`hub.json` 都在这下面）                                                                                 |
 
 ## 两把 `FE_TOKEN`
 

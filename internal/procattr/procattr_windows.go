@@ -3,13 +3,21 @@
 // Package procattr suppresses the console window Windows would otherwise
 // create for a child process.
 //
-// This matters only because the host is now linked with -H=windowsgui. A
-// console-subsystem binary owns a console that its children inherit, so before
-// the single-exe change every child was silently adopted into the launcher's
-// hidden console. A GUI-subsystem process has no console at all, so Windows
-// allocates a fresh one for each console child — and the default terminal
-// makes it visible. Without this, double-clicking the host pops a terminal for
-// the grok agent and flashes another for every `git` call.
+// It exists because of a Windows quirk that bites any process without a
+// console: a console-subsystem parent owns a console its children inherit and
+// appear nowhere, but a parent that has NO console forces Windows to allocate a
+// fresh one for every console child — and the default terminal makes that one
+// visible.
+//
+// Two processes here are in that position. Capri.exe is a GUI-subsystem
+// binary, so it spawns the host with this flag. Capri-host may itself be
+// started detached (a service manager, a supervisor that handed it no console),
+// so it applies the same flag to the grok, git and shell children it runs.
+// Without it, double-clicking the tray flashes a terminal for the host and
+// another for every `git` call.
+//
+// The child still gets a console — so its stdio handles behave normally and the
+// pipes acp attaches keep working — it simply has no window.
 package procattr
 
 import (

@@ -1,4 +1,4 @@
-// Package hub implements the capri-host side of the hub relay: pairing with
+// Package hub implements the Capri-host side of the hub relay: pairing with
 // capri-hub (pairing code → token), forwarding local bridge events over
 // WebSocket or QUIC, and serving relayed browser requests by executing
 // them against this host's local HTTP API.
@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/AgentsHarness/capri-host/internal/acp"
+	"github.com/AgentsHarness/capri-host/internal/config"
+	"github.com/AgentsHarness/capri-host/internal/hubstate"
 	"github.com/coder/websocket"
 	"github.com/quic-go/quic-go"
 )
@@ -226,6 +228,14 @@ type Client struct {
 	// Created in NewClient, not Run, because Pair may be called before Run
 	// starts. Buffered 1: the signal is a level, not a queue.
 	repairCh chan struct{}
+
+	// name is the current display name. Deliberately NOT cfg.HostName:
+	// Rename mutates it while Run, State and pair are live, and cfg is read
+	// without a lock all over this file, so writing it in place would be a
+	// data race — the same reason Manager builds a new Client instead of
+	// retargeting cfg.URL. atomic.Value because the readers are lock-free
+	// today and should stay that way.
+	name atomic.Value // string
 }
 
 // replayItem is one ring slot. seq is denormalized for watermark
@@ -286,6 +296,15 @@ const healthySessionMin = 60 * time.Second
 const sessionIdleTimeout = 75 * time.Second
 
 // NewClient returns a hub client. LocalBase defaults to 127.0.0.1:8765.
+// hostName is the display name currently in use. Safe from any goroutine,
+// including while Rename is applying a new one.
+func (c *Client) hostName() string {
+	if v, ok := c.name.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
 func NewClient(cfg Config) *Client {
 	if cfg.LocalBase == "" {
 		cfg.LocalBase = "http://127.0.0.1:8765"
@@ -293,7 +312,7 @@ func NewClient(cfg Config) *Client {
 	if cfg.QUICPort == 0 {
 		cfg.QUICPort = 8788
 	}
-	return &Client{
+	c := &Client{
 		cfg:   cfg,
 		local: cfg.Local,
 		// Generous timeout: relayed prompts can run up to 30 minutes.
@@ -303,6 +322,8 @@ func NewClient(cfg Config) *Client {
 		// would make requestRepair's non-blocking send silently vanish.
 		repairCh: make(chan struct{}, 1),
 	}
+	c.name.Store(cfg.HostName)
+	return c
 }
 
 // Run connects the host to the hub: pairs when no token exists, forwards
@@ -339,7 +360,7 @@ func (c *Client) Run(ctx context.Context, bridge bridgeSource) {
 		}
 	}
 	c.setLastErr(nil)
-	log.Printf("[hub-client] connected to hub %s as %s (%s)", c.cfg.URL, c.cfg.HostID, c.cfg.HostName)
+	log.Printf("[hub-client] connected to hub %s as %s (%s)", c.cfg.URL, c.cfg.HostID, c.hostName())
 
 	c.sendCh = make(chan []byte, 256)
 	c.reqCh = make(chan reqFrame, 64)
@@ -501,7 +522,7 @@ func (c *Client) pair(ctx context.Context, code string) (string, error) {
 	payload := map[string]any{
 		"code":     code,
 		"hostId":   c.cfg.HostID,
-		"hostName": c.cfg.HostName,
+		"hostName": c.hostName(),
 	}
 	if p := c.listenPort(); p > 0 {
 		payload["port"] = p
@@ -529,12 +550,10 @@ func (c *Client) pair(ctx context.Context, code string) (string, error) {
 	return out.Token, nil
 }
 
-// stateFile persists {url, hostId, token} so restarts skip re-pairing.
-type stateFile struct {
-	URL    string `json:"url"`
-	HostID string `json:"hostId"`
-	Token  string `json:"token"`
-}
+// stateFile persists {url, hostId, token} so restarts skip re-pairing. An
+// alias rather than a second declaration: the same file is read by the GUI
+// supervisors, and hubstate is where that shared shape is defined.
+type stateFile = hubstate.StoredToken
 
 func (c *Client) stateFileLocked() string {
 	if c.cfg.StateFile != "" {
@@ -544,40 +563,18 @@ func (c *Client) stateFileLocked() string {
 }
 
 // defaultStateFile is where the pairing token lives when Config.StateFile is
-// unset. Package-level so the manager resolves the same path rather than
-// keeping its own copy of the rule.
+// unset. It defers to config so the host, both GUI supervisors and this package
+// cannot disagree about the path — and so CAPRI_HOME moves all of them at once.
 func defaultStateFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".capri-host", "hub.json")
+	return config.HubStatePath()
 }
 
 func (c *Client) loadStateLocked() *stateFile {
-	return readStateFile(c.stateFileLocked())
+	return hubstate.ReadToken(c.stateFileLocked())
 }
 
 func (c *Client) saveStateLocked(st stateFile) {
 	_ = writeStateFile(c.stateFileLocked(), st)
-}
-
-// readStateFile returns the persisted pairing, or nil when there is none to
-// read. Package-level so the manager can inspect a token without holding some
-// particular client's mutex.
-func readStateFile(path string) *stateFile {
-	if path == "" {
-		return nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var st stateFile
-	if json.Unmarshal(b, &st) != nil {
-		return nil
-	}
-	return &st
 }
 
 // writeStateFile persists a pairing at 0600 — it holds a hub credential.

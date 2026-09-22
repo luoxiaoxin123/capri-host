@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// DefaultBindAddr 是默认监听地址：capri-host 的 /api/* 能驱动 agent 进程，
+// DefaultBindAddr 是默认监听地址：Capri-host 的 /api/* 能驱动 agent 进程，
 // 默认只对本机开放。要局域网访问（例如手机开内嵌前端）显式设 BIND=0.0.0.0
 // —— 那必须同时设 FE_TOKEN，见 CheckBindPolicy。
 const DefaultBindAddr = "127.0.0.1"
@@ -27,8 +27,7 @@ type Config struct {
 	HostName    string
 	// HUB_QUIC_PIN: pin the hub's QUIC certificate by SPKI sha256
 	// fingerprint (hex or base64) instead of the system CA path — the
-	// self-signed-hub replacement for disabling verification. See
-	// docs/DEPLOY.md for the openssl one-liner that generates it.
+	// self-signed-hub replacement for disabling verification.
 	HubQUICPin string
 	// Inbound access token for this host's own HTTP API (/api/*, /events).
 	// Set FE_TOKEN (or ACCESS_TOKEN) to require it; empty = open (local
@@ -36,12 +35,6 @@ type Config struct {
 	// semantics as the hub's FE_TOKEN — deploy the same value so the
 	// browser gate and the host port share one credential.
 	AccessToken string
-	// OpenBrowser opens the local web UI once the server is listening.
-	// Default true — it replaces the launcher script's final step, which is
-	// the only reason a double-clicked exe shows anything at all.
-	OpenBrowser bool
-	// EnableTray runs the system tray (Windows only). Default true.
-	EnableTray bool
 	// ConfigSource is the settings file that was read, empty when none was
 	// found. Recorded for the startup log so a misplaced config is visible.
 	ConfigSource string
@@ -68,27 +61,15 @@ type Config struct {
 	proxyFromSystem bool
 }
 
-// DefaultHostID and DefaultHostName are the compiled-in identity used when
-// nothing else supplies one. Exported so a caller can tell "the user never
-// chose an identity" from "the user chose this one" — the hub keys its host
-// table by id, so leaving every unconfigured host on the same default makes
-// two of them displace each other on the same hub.
-const (
-	DefaultHostID   = "local"
-	DefaultHostName = "Local Host"
-)
-
 func Load() Config {
 	c := Config{
-		Port:        8765,
-		GrokBin:     "grok",
-		HostID:      DefaultHostID,
-		HostName:    DefaultHostName,
-		OpenBrowser: true,
-		EnableTray:  true,
+		Port:     8765,
+		GrokBin:  "grok",
+		HostID:   DefaultHostID,
+		HostName: DefaultHostName,
 	}
 
-	// Layer 1: config.toml (Windows tray / single-exe path).
+	// Layer 1: config.toml (legacy Windows single-exe / tray path).
 	path := ConfigPath()
 	fc, err := loadFile(path)
 	if err != nil {
@@ -98,8 +79,8 @@ func Load() Config {
 		c.ConfigSource = path
 	}
 
-	// Layer 2: config.json (macOS Capri.app / upstream). Fills empty fields
-	// only so a hand-written toml still wins over the JSON defaults.
+	// Layer 2: config.json (macOS Capri.app / Windows Capri.exe / upstream).
+	// Fills empty fields only so a hand-written toml still wins.
 	jf, jerr := LoadFile()
 	if jerr != nil && c.ConfigError == nil {
 		c.ConfigError = jerr
@@ -124,8 +105,6 @@ func Load() Config {
 	if v := firstNonEmpty(os.Getenv("FE_TOKEN"), os.Getenv("ACCESS_TOKEN")); v != "" {
 		c.AccessToken = v
 	}
-	envBool(&c.OpenBrowser, "CAPRI_OPEN_BROWSER")
-	envBool(&c.EnableTray, "CAPRI_TRAY")
 	// BIND / HOST_BIND: env wins; else config.json bind; else loopback.
 	c.BindAddr = bindAddr(jf.Bind)
 	c.ResidentCap = envResidentCap()
@@ -141,7 +120,7 @@ func Load() Config {
 }
 
 // applyJSONFile overlays upstream config.json onto c for fields still at
-// compiled defaults / empty, so Capri.app settings are visible to the host.
+// compiled defaults / empty, so Capri.app / Capri.exe settings are visible.
 func applyJSONFile(c *Config, f File) {
 	if f.Port > 0 && c.Port == 8765 {
 		c.Port = f.Port
@@ -225,16 +204,6 @@ func envResidentCap() int {
 func envSet(dst *string, key string) {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		*dst = v
-	}
-}
-
-// envBool accepts 1/0, true/false, yes/no. Anything else leaves dst alone.
-func envBool(dst *bool, key string) {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "1", "true", "yes", "on":
-		*dst = true
-	case "0", "false", "no", "off":
-		*dst = false
 	}
 }
 

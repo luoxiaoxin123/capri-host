@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/AgentsHarness/capri-host/internal/acp"
 	"github.com/AgentsHarness/capri-host/internal/config"
+	"github.com/AgentsHarness/capri-host/internal/hubstate"
 )
 
 // This file exists so the hub address itself can be chosen at runtime, not
@@ -122,26 +122,44 @@ func (m *Manager) State() State {
 	cl, cfg := m.cur, m.cfg
 	m.mu.Unlock()
 
+	var st State
 	if cl != nil {
-		return cl.State()
-	}
-	st := State{
-		Configured: cfg.URL != "",
-		HubURL:     cfg.URL,
-		HostID:     cfg.HostID,
-		HostName:   cfg.HostName,
-	}
-	// Read the token straight off disk. Without this a tray opened in the
-	// instant between two clients reports "未配对" on a host that is paired,
-	// and the hub menu entry would blink out of existence.
-	if st.Configured {
-		if cfg.Token != "" {
-			st.Paired = true
-		} else if s := readStateFile(stateFilePathFor(cfg)); s != nil && s.URL == cfg.URL && s.Token != "" {
-			st.Paired = true
+		st = cl.State()
+	} else {
+		st = State{
+			Configured: cfg.URL != "",
+			HubURL:     cfg.URL,
+			HostID:     cfg.HostID,
+			HostName:   cfg.HostName,
+		}
+		// Read the token straight off disk. Without this a tray opened in the
+		// instant between two clients reports "未配对" on a host that is paired,
+		// and the hub menu entry would blink out of existence.
+		if st.Configured {
+			if cfg.Token != "" {
+				st.Paired = true
+			} else if hubstate.ReadToken(stateFilePathFor(cfg)).Usable(cfg.URL) {
+				st.Paired = true
+			}
 		}
 	}
+	token := hubstate.ReadToken(stateFilePathFor(cfg))
+	if token != nil {
+		st.StoredURL = token.URLOrEmpty()
+		checkURL := st.HubURL
+		if checkURL == "" {
+			checkURL = st.StoredURL
+		}
+		st.CanReuse = token.Usable(checkURL)
+	}
 	return st
+}
+
+// Disconnect clears the configured hub address and shuts down the running hub
+// client, returning the host to local-only mode.
+func (m *Manager) Disconnect() error {
+	m.pointAt("")
+	return nil
 }
 
 // HubURL is the address currently configured, empty in local mode.
@@ -151,25 +169,17 @@ func (m *Manager) HubURL() string {
 	return m.cfg.URL
 }
 
-// HostName is the display name currently in use (after the boot-time
-// identity adoption), shown in the tray tooltip and the info dialog.
-func (m *Manager) HostName() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.cfg.HostName
-}
-
 // Rename updates the host's display name everywhere it appears: the hub
 // registry (so browsers see the new name live), the running bridge (so the
-// local API and grok frames use it), and config.toml (so it survives a
+// local API and grok frames use it), and config.json (so it survives a
 // restart). An empty or whitespace-only name is refused.
 //
 // The hub update runs through the live client when one is connected; in
 // local mode or before the first pairing it is skipped (there is no hub to
-// tell). A hub-side failure is reported but does not roll back the local
-// change: the name is the user's choice and the hub rename is best-effort
-// (the next event frame carries the new name anyway, and the hub will
-// reconcile when it sees it).
+// tell). A hub-side failure is logged and does not roll back the local
+// change, and it is not stored in LastError: that field is the session
+// failure the menus show. The name is the user's choice; the next event
+// frame carries it anyway.
 func (m *Manager) Rename(ctx context.Context, newName string) error {
 	newName = strings.TrimSpace(newName)
 	if newName == "" {
@@ -181,13 +191,17 @@ func (m *Manager) Rename(ctx context.Context, newName string) error {
 	cl := m.cur
 	m.mu.Unlock()
 
-	if err := config.Save(config.Settings{HostName: config.String(newName)}); err != nil {
+	if err := config.UpdateFile(func(f *config.File) { f.HostName = newName }); err != nil {
 		log.Printf("[hub-manager] 改名写回配置失败（本次运行仍然生效）: %v", err)
 	}
 	if m.bridge != nil {
 		m.bridge.SetHostName(newName)
 	}
 	if cl != nil {
+		// Apply locally first so State() and the next event frame agree with
+		// the file even if the hub call fails. The hub result stays out of
+		// LastError: that field is the session failure the menus show.
+		cl.name.Store(newName)
 		if err := cl.Rename(ctx, newName); err != nil {
 			log.Printf("[hub-manager] 通知 hub 改名失败（本地已更新）: %v", err)
 		}
@@ -219,7 +233,7 @@ func (m *Manager) PairWith(ctx context.Context, rawURL, code string) error {
 	}
 
 	m.mu.Lock()
-	cur, cfg, bridge := m.cur, m.cfg, m.bridge
+	cur, cfg := m.cur, m.cfg
 	m.mu.Unlock()
 
 	if want == "" {
@@ -249,18 +263,76 @@ func (m *Manager) PairWith(ctx context.Context, rawURL, code string) error {
 		return fmt.Errorf("配对成功但无法保存凭证: %w", err)
 	}
 
+	// The credential is secured; hand off the move-and-wake to the same helper
+	// the reuse path uses, so the two cannot drift apart.
+	log.Printf("[hub-manager] 已配对 %s，凭证已保存", want)
+	m.pointAt(want)
+	return nil
+}
+
+// Reuse points the host at hubURL using the credential already on disk.
+//
+// This is the "I have paired with this hub before" path, and it exists because
+// pairing is the wrong answer to it: a code has to be fetched from the hub,
+// expires in 15 minutes, and buys nothing when hub.json already holds a valid
+// token for that exact address. Both GUI supervisors used to send the user
+// through pairing anyway.
+//
+// It refuses when no usable credential exists, because then the caller really
+// does have to pair — silently falling back would hide that.
+//
+// No context: nothing here blocks. It reads one small file and nudges the
+// supervision loop, and pairing's own long path (the hub round trip) does not
+// happen at all.
+func (m *Manager) Reuse(rawURL string) error {
+	want, err := NormalizeHubURL(rawURL)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	cur, cfg := m.cur, m.cfg
+	m.mu.Unlock()
+
+	if want == "" {
+		want = cfg.URL
+	}
+	if want == "" {
+		return errors.New("请先填写 hub 地址")
+	}
+
+	path := stateFilePathFor(cfg)
+	if !hubstate.ReadToken(path).Usable(want) {
+		return fmt.Errorf("%s 里没有 %s 的可用凭证，请用配对码配对", path, want)
+	}
+	// Already pointed there with a live client: it is running on exactly this
+	// credential, so there is nothing to change and nothing to wake.
+	if want == cfg.URL && cur != nil {
+		return nil
+	}
+
+	m.pointAt(want)
+	log.Printf("[hub-manager] 复用已有凭证连接 %s", want)
+	return nil
+}
+
+// pointAt moves the manager to want, persists the choice, and wakes the
+// supervision loop so it rebuilds against the new address.
+//
+// The credential is the caller's business — pairing mints one, reuse finds one
+// on disk — so this is only the move-and-wake half the two paths share.
+func (m *Manager) pointAt(want string) {
 	m.mu.Lock()
 	changed := m.cfg.URL != want
 	m.cfg.URL = want
-	// Drop any startup-supplied credential. HOST_TOKEN and HUB_PAIR_CODE take
-	// priority in ensureToken, so leaving them set would make the next client
-	// ignore the token we just earned.
+	// Any startup-supplied credential is now stale: HOST_TOKEN and
+	// HUB_PAIR_CODE take priority in ensureToken, so leaving them set would
+	// make the next client ignore the credential we just settled on.
 	m.cfg.Token = ""
 	m.cfg.PairCode = ""
 	cancel := m.cancel
+	bridge := m.bridge
 	m.mu.Unlock()
-
-	log.Printf("[hub-manager] 已配对 %s，凭证已保存", want)
 
 	if changed && m.persist != nil {
 		if err := m.persist(want); err != nil {
@@ -268,8 +340,6 @@ func (m *Manager) PairWith(ctx context.Context, rawURL, code string) error {
 		}
 	}
 
-	// Tear down the old client so the supervision loop rebuilds against the
-	// new address, and wake it in case it is idling in local mode.
 	if cancel != nil {
 		cancel()
 	}
@@ -283,7 +353,6 @@ func (m *Manager) PairWith(ctx context.Context, rawURL, code string) error {
 		// the new address up on its first iteration.
 		log.Printf("[hub-manager] hub 客户端尚未启动，将在启动时使用 %s", want)
 	}
-	return nil
 }
 
 // stateFilePathFor resolves where a config's token lives, matching the
@@ -296,37 +365,7 @@ func stateFilePathFor(cfg Config) string {
 }
 
 // NormalizeHubURL cleans up an address a person typed. An empty input stays
-// empty, which callers read as "unchanged".
-//
-// A bare host gets https, because that is what a hub behind a reverse proxy
-// looks like and typing the scheme every time is friction. A hub served as
-// plain HTTP therefore has to be entered with http:// — the alternative,
-// guessing from the port number, is wrong often enough to be worse than a rule
-// that can be stated in one line in the dialog.
+// empty, which callers read as "unchanged". See hubstate.NormalizeURL.
 func NormalizeHubURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", nil
-	}
-	if !strings.Contains(s, "://") {
-		s = "https://" + s
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", fmt.Errorf("hub 地址无法解析: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("hub 地址只支持 http/https，收到 %q", u.Scheme)
-	}
-	if u.Hostname() == "" {
-		return "", errors.New("hub 地址缺少主机名")
-	}
-	// Everything past the origin is dropped: the client appends its own paths
-	// (/api/pair, /api/host/...), so a pasted "…/api/pairing" would otherwise
-	// become "…/api/pairing/api/pair" and fail with a confusing 404.
-	u.Path = ""
-	u.RawQuery = ""
-	u.Fragment = ""
-	u.User = nil
-	return u.String(), nil
+	return hubstate.NormalizeURL(raw)
 }
